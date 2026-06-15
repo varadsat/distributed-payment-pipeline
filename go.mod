@@ -1,4 +1,4 @@
-module github.com/yourname/payment-pipeline
+module github.com/varadsat/distributed-payment-pipeline
 
 go 1.22
 

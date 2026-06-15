@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package payment.v1;
 
-option go_package = "github.com/yourname/payment-pipeline/gen/payment/v1;paymentv1";
+option go_package = "github.com/varadsat/distributed-payment-pipeline/gen/payment/v1;paymentv1";
 
 import "google/protobuf/timestamp.proto";
 

@@ -5,10 +5,10 @@ package intake
 import (
 	"context"
 
-	"github.com/yourname/payment-pipeline/internal/idempotency"
-	"github.com/yourname/payment-pipeline/internal/normalize"
-	"github.com/yourname/payment-pipeline/internal/store"
-	"github.com/yourname/payment-pipeline/internal/validate"
+	"github.com/varadsat/distributed-payment-pipeline/internal/idempotency"
+	"github.com/varadsat/distributed-payment-pipeline/internal/normalize"
+	"github.com/varadsat/distributed-payment-pipeline/internal/store"
+	"github.com/varadsat/distributed-payment-pipeline/internal/validate"
 )
 
 // Server wires the intake pipeline together. It implements the generated

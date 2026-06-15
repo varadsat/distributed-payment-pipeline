@@ -1,7 +1,7 @@
 // Package validate runs field-level and business-rule checks on a Transaction.
 package validate
 
-import "github.com/yourname/payment-pipeline/internal/domain"
+import "github.com/varadsat/distributed-payment-pipeline/internal/domain"
 
 // Validator enforces field-level checks (currency code, positive amount) and
 // business rules (account exists/active, amount within limits). Business-rule

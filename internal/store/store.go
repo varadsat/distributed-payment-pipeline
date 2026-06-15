@@ -4,7 +4,7 @@ package store
 import (
 	"context"
 
-	"github.com/yourname/payment-pipeline/internal/domain"
+	"github.com/varadsat/distributed-payment-pipeline/internal/domain"
 )
 
 // Store persists transactions and writes outbox rows in the SAME transaction

@@ -1,7 +1,7 @@
 // Package normalize converts per-source payloads into a canonical Transaction.
 package normalize
 
-import "github.com/yourname/payment-pipeline/internal/domain"
+import "github.com/varadsat/distributed-payment-pipeline/internal/domain"
 
 // SourceNormalizer maps one source's raw payload into the canonical form.
 // Register one per (source, schema_version) pair to support schema evolution.
