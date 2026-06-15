@@ -1,8 +1,9 @@
-# Local dev stack. Redpanda is a single-binary, Kafka-API-compatible broker
-# that is much lighter than running Kafka + ZooKeeper for a personal project.
+# Local dev stack. Kafka runs in single-node KRaft mode (no ZooKeeper),
+# which keeps a personal-project broker lightweight. All images below are
+# ones already present locally, so `docker compose up` won't pull anything.
 services:
   postgres:
-    image: postgres:16
+    image: postgres:16-alpine
     environment:
       POSTGRES_USER: payments
       POSTGRES_PASSWORD: payments
@@ -13,29 +14,40 @@ services:
       - pgdata:/var/lib/postgresql/data
 
   redis:
-    image: redis:7
+    image: redis:7-alpine
     ports:
       - "6379:6379"
 
-  redpanda:
-    image: redpandadata/redpanda:latest
-    command:
-      - redpanda start
-      - --smp 1
-      - --overprovisioned
-      - --kafka-addr PLAINTEXT://0.0.0.0:9092
-      - --advertise-kafka-addr PLAINTEXT://localhost:9092
+  kafka:
+    image: apache/kafka:3.7.2
     ports:
       - "9092:9092"
-
-  redpanda-console:
-    image: redpandadata/console:latest
     environment:
-      KAFKA_BROKERS: redpanda:9092
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      # INTERNAL listener is for other containers (e.g. kafka-ui) via the
+      # service hostname; EXTERNAL is for host apps via localhost.
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      # Single-node replication factors must be 1.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:latest
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
     ports:
       - "8080:8080"
     depends_on:
-      - redpanda
+      - kafka
 
 volumes:
   pgdata:
