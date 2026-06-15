@@ -1,0 +1,78 @@
+syntax = "proto3";
+
+package payment.v1;
+
+option go_package = "github.com/yourname/payment-pipeline/gen/payment/v1;paymentv1";
+
+import "google/protobuf/timestamp.proto";
+
+// PaymentIntake is the inbound API. Callers are internal services and
+// partner-facing gateways we control (so gRPC, not REST).
+service PaymentIntake {
+  rpc SubmitPayment(SubmitPaymentRequest) returns (SubmitPaymentResponse);
+  // Client-streaming RPC: callers stream many payments over one connection.
+  rpc BatchSubmitPayment(stream SubmitPaymentRequest) returns (BatchSubmitPaymentResponse);
+  rpc GetPaymentStatus(GetPaymentStatusRequest) returns (GetPaymentStatusResponse);
+}
+
+enum PaymentSource {
+  PAYMENT_SOURCE_UNSPECIFIED = 0;
+  PAYMENT_SOURCE_CARD = 1;
+  PAYMENT_SOURCE_UPI = 2;
+  PAYMENT_SOURCE_BANK_TRANSFER = 3;
+  PAYMENT_SOURCE_WALLET = 4;
+}
+
+enum PaymentState {
+  PAYMENT_STATE_UNSPECIFIED = 0;
+  PAYMENT_STATE_RECEIVED = 1;
+  PAYMENT_STATE_VALIDATED = 2;
+  PAYMENT_STATE_AUTHORIZED = 3;
+  PAYMENT_STATE_CAPTURED = 4;
+  PAYMENT_STATE_SETTLED = 5;
+  PAYMENT_STATE_RECONCILED = 6;
+  PAYMENT_STATE_FAILED = 7;
+}
+
+// Money is always stored in minor units (paise, cents). Never floats.
+message Money {
+  int64 minor_units = 1;
+  string currency = 2; // ISO 4217, e.g. "INR", "USD"
+}
+
+message SubmitPaymentRequest {
+  string idempotency_key = 1; // client-supplied; primary dedup key
+  PaymentSource source = 2;
+  string external_txn_id = 3; // id from the source system
+  string account_id = 4;
+  Money amount = 5;
+  uint32 schema_version = 6;
+  map<string, string> metadata = 7;
+}
+
+message SubmitPaymentResponse {
+  string payment_id = 1;
+  PaymentState state = 2;
+  bool deduplicated = 3; // true if returned from the idempotency cache
+  google.protobuf.Timestamp received_at = 4;
+}
+
+message BatchSubmitPaymentResponse {
+  uint32 accepted = 1;
+  uint32 deduplicated = 2;
+  uint32 rejected = 3;
+  repeated string payment_ids = 4;
+}
+
+message GetPaymentStatusRequest {
+  oneof key {
+    string payment_id = 1;
+    string idempotency_key = 2;
+  }
+}
+
+message GetPaymentStatusResponse {
+  string payment_id = 1;
+  PaymentState state = 2;
+  google.protobuf.Timestamp updated_at = 3;
+}

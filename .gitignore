@@ -1,0 +1,7 @@
+/bin/
+/gen/
+*.exe
+.env
+coverage.out
+
+BUILD_PLAN.md
