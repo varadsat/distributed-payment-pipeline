@@ -1,6 +1,9 @@
 package domain
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // State is the payment lifecycle state machine.
 type State string
@@ -26,10 +29,8 @@ var allowed = map[State][]State{
 
 // Transition validates and returns the next state, or an error if illegal.
 func Transition(from, to State) error {
-	for _, s := range allowed[from] {
-		if s == to {
-			return nil
-		}
+	if slices.Contains(allowed[from], to) {
+		return nil
 	}
 	return fmt.Errorf("illegal state transition: %s -> %s", from, to)
 }
