@@ -22,13 +22,6 @@ up:
 down:
 	docker compose down
 
-# Apply migrations (example uses golang-migrate; swap for your tool of choice)
-migrate-up:
-	migrate -path internal/store/migrations -database "$$DATABASE_URL" up
-
-migrate-down:
-	migrate -path internal/store/migrations -database "$$DATABASE_URL" down
-
 test:
 	go test ./... -race -cover
 
