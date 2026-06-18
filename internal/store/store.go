@@ -3,7 +3,12 @@ package store
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/varadsat/distributed-payment-pipeline/internal/domain"
 )
 
@@ -19,3 +24,142 @@ type Store interface {
 }
 
 // TODO: pgxStore implements Store using a pgxpool.Pool and a single tx in SaveWithOutbox.
+type pgxStore struct {
+	pool *pgxpool.Pool
+}
+
+func NewStore() *pgxStore {
+	dbpool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Unable to create connection pool: %v\n", err)
+		os.Exit(1)
+	}
+	return &pgxStore{
+		pool: dbpool,
+	}
+}
+
+func (s *pgxStore) GetByPaymentID(ctx context.Context, paymentID string) (domain.Transaction, error) {
+	var tx domain.Transaction
+
+	err := s.pool.QueryRow(ctx, `
+        SELECT
+            payment_id,
+            idempotency_key,
+            source,
+            external_txn_id,
+            account_id,
+            amount_minor,
+            currency,
+            state,
+            schema_version,
+            metadata,
+            created_at,
+            updated_at
+        FROM transactions
+        WHERE payment_id = $1
+    `, paymentID).Scan(
+		&tx.PaymentID,
+		&tx.IdempotencyKey,
+		&tx.Source,
+		&tx.ExternalTxnID,
+		&tx.AccountID,
+		&tx.Amount.MinorUnits,
+		&tx.Amount.Currency,
+		&tx.State,
+		&tx.SchemaVersion,
+		&tx.Metadata,
+		&tx.CreatedAt,
+		&tx.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.Transaction{}, fmt.Errorf("transaction not found for payment_id=%s", paymentID)
+		}
+		return domain.Transaction{}, fmt.Errorf("query transaction by payment_id: %w", err)
+	}
+
+	return tx, nil
+}
+
+func (s *pgxStore) GetByIdempotencyKey(ctx context.Context, key string) (domain.Transaction, error) {
+	var tx domain.Transaction
+
+	err := s.pool.QueryRow(ctx, `
+        SELECT
+            payment_id,
+            idempotency_key,
+            source,
+            external_txn_id,
+            account_id,
+            amount_minor,
+            currency,
+            state,
+            schema_version,
+            metadata,
+            created_at,
+            updated_at
+        FROM transactions
+        WHERE idempotency_key = $1
+    `, key).Scan(
+		&tx.PaymentID,
+		&tx.IdempotencyKey,
+		&tx.Source,
+		&tx.ExternalTxnID,
+		&tx.AccountID,
+		&tx.Amount.MinorUnits,
+		&tx.Amount.Currency,
+		&tx.State,
+		&tx.SchemaVersion,
+		&tx.Metadata,
+		&tx.CreatedAt,
+		&tx.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.Transaction{}, fmt.Errorf("transaction not found for idempotency_key=%s", key)
+		}
+		return domain.Transaction{}, fmt.Errorf("query transaction by idempotency_key: %w", err)
+	}
+
+	return tx, nil
+}
+
+func (s *pgxStore) Save(ctx context.Context, t domain.Transaction) error {
+	_, err := s.pool.Exec(ctx, `
+        INSERT INTO transactions (
+            payment_id,
+            idempotency_key,
+            source,
+            external_txn_id,
+            account_id,
+            amount_minor,
+            currency,
+            state,
+            schema_version,
+            metadata,
+            created_at,
+            updated_at
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+        )
+    `,
+		t.PaymentID,
+		t.IdempotencyKey,
+		t.Source,
+		t.ExternalTxnID,
+		t.AccountID,
+		t.Amount.MinorUnits,
+		t.Amount.Currency,
+		t.State,
+		t.SchemaVersion,
+		t.Metadata,
+		t.CreatedAt,
+		t.UpdatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("insert transaction: %w", err)
+	}
+
+	return nil
+}
