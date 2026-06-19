@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,6 +20,8 @@ type Store interface {
 	UpdateState(ctx context.Context, paymentID string, from, to domain.State) error
 	GetByPaymentID(ctx context.Context, paymentID string) (domain.Transaction, error)
 	GetByIdempotencyKey(ctx context.Context, key string) (domain.Transaction, error)
+	Save(ctx context.Context, t domain.Transaction) error
+	Close()
 }
 
 // TODO: pgxStore implements Store using a pgxpool.Pool and a single tx in SaveWithOutbox.
@@ -28,15 +29,17 @@ type pgxStore struct {
 	pool *pgxpool.Pool
 }
 
-func NewStore() *pgxStore {
-	dbpool, err := pgxpool.New(context.Background(), os.Getenv("DATABASE_URL"))
+func NewStore(ctx context.Context, databaseURL string) (*pgxStore, error) {
+	if databaseURL == "" {
+		return nil, errors.New("database URL is required")
+	}
+
+	dbpool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Unable to create connection pool: %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("create connection pool: %w", err)
 	}
-	return &pgxStore{
-		pool: dbpool,
-	}
+
+	return &pgxStore{pool: dbpool}, nil
 }
 
 func (s *pgxStore) GetByPaymentID(ctx context.Context, paymentID string) (domain.Transaction, error) {
@@ -155,11 +158,24 @@ func (s *pgxStore) Save(ctx context.Context, t domain.Transaction) error {
 		t.SchemaVersion,
 		t.Metadata,
 		t.CreatedAt,
-		t.UpdatedAt,
+		t.UpdatedAt, 
 	)
 	if err != nil {
 		return fmt.Errorf("insert transaction: %w", err)
 	}
 
+	return nil
+}
+
+// implement a Close function to close the connection pool when the application shuts down.
+func (s *pgxStore) Close() {
+	s.pool.Close()
+}
+
+func (s *pgxStore) SaveWithOutbox(ctx context.Context, t domain.Transaction, outboxPayload []byte) error {
+	return nil
+}
+
+func (s *pgxStore) UpdateState(ctx context.Context, paymentID string, from, to domain.State) error {
 	return nil
 }
