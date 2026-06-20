@@ -9,11 +9,13 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
 	paymentv1 "github.com/varadsat/distributed-payment-pipeline/gen/payment/v1"
 	"github.com/varadsat/distributed-payment-pipeline/internal/config"
+	"github.com/varadsat/distributed-payment-pipeline/internal/idempotency"
 	"github.com/varadsat/distributed-payment-pipeline/internal/intake"
 	"github.com/varadsat/distributed-payment-pipeline/internal/normalize"
 	"github.com/varadsat/distributed-payment-pipeline/internal/store"
@@ -32,10 +34,19 @@ func main() {
 	registry.Register("CARD", 1, &normalize.CardNormalizer{})
 	registry.Register("UPI", 1, &normalize.UPINormalizer{})
 
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:     cfg.RedisAddr,
+		Password: "",
+		DB:       0,
+	})
+	defer redisClient.Close()
+	redisStore := idempotency.NewRedisStore(redisClient, cfg.IdempotencyTTLSeconds)
+
 	grpcServer := grpc.NewServer()
 	paymentv1.RegisterPaymentIntakeServer(grpcServer, &intake.Server{
 		Normalizers: registry,
 		Store:       dbStore,
+		Idem:        redisStore,
 	})
 
 	reflection.Register(grpcServer) // enables grpcurl / reflection clients

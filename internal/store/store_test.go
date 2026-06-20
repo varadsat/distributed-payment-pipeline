@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -76,9 +77,10 @@ func TestSaveAndRetrieveTransaction(t *testing.T) {
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
 	}
+	outboxPayload := []byte(`{"event":"payment.received"}`)
 
-	if err := s.Save(ctx, tx); err != nil {
-		t.Fatalf("Save() error = %v", err)
+	if err := s.SaveWithOutbox(ctx, tx, outboxPayload); err != nil {
+		t.Fatalf("SaveWithOutbox() error = %v", err)
 	}
 
 	gotByID, err := s.GetByPaymentID(ctx, tx.PaymentID)
@@ -103,5 +105,68 @@ func TestSaveAndRetrieveTransaction(t *testing.T) {
 
 	if gotByKey.PaymentID != tx.PaymentID {
 		t.Fatalf("PaymentID mismatch via idempotency key: got %q want %q", gotByKey.PaymentID, tx.PaymentID)
+	}
+
+	var (
+		outboxID     int64
+		aggregateID  string
+		topic        string
+		partitionKey string
+		payload      []byte
+		createdAt    time.Time
+		publishedAt  *time.Time
+	)
+
+	err = s.pool.QueryRow(ctx, `
+		SELECT
+			id,
+			aggregate_id,
+			topic,
+			partition_key,
+			payload,
+			created_at,
+			published_at
+		FROM outbox
+		WHERE aggregate_id = $1
+		ORDER BY id DESC
+		LIMIT 1
+	`, tx.PaymentID).Scan(
+		&outboxID,
+		&aggregateID,
+		&topic,
+		&partitionKey,
+		&payload,
+		&createdAt,
+		&publishedAt,
+	)
+	if err != nil {
+		t.Fatalf("query outbox row: %v", err)
+	}
+
+	if aggregateID != tx.PaymentID {
+		t.Fatalf("outbox aggregate_id = %q, want %q", aggregateID, tx.PaymentID)
+	}
+	if topic != "payments.received" {
+		t.Fatalf("outbox topic = %q, want %q", topic, "payments.received")
+	}
+	if partitionKey != tx.AccountID {
+		t.Fatalf("outbox partition_key = %q, want %q", partitionKey, tx.AccountID)
+	}
+	var gotPayload map[string]string
+	if err := json.Unmarshal(payload, &gotPayload); err != nil {
+		t.Fatalf("decode outbox payload: %v", err)
+	}
+	var wantPayload map[string]string
+	if err := json.Unmarshal(outboxPayload, &wantPayload); err != nil {
+		t.Fatalf("decode expected payload: %v", err)
+	}
+	if gotPayload["event"] != wantPayload["event"] {
+		t.Fatalf("outbox payload = %+v, want %+v", gotPayload, wantPayload)
+	}
+	if publishedAt != nil {
+		t.Fatalf("outbox published_at = %v, want nil", publishedAt)
+	}
+	if outboxID <= 0 {
+		t.Fatalf("outbox id = %d, want positive value", outboxID)
 	}
 }

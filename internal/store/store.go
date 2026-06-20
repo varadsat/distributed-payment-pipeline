@@ -158,7 +158,7 @@ func (s *pgxStore) Save(ctx context.Context, t domain.Transaction) error {
 		t.SchemaVersion,
 		t.Metadata,
 		t.CreatedAt,
-		t.UpdatedAt, 
+		t.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("insert transaction: %w", err)
@@ -173,6 +173,72 @@ func (s *pgxStore) Close() {
 }
 
 func (s *pgxStore) SaveWithOutbox(ctx context.Context, t domain.Transaction, outboxPayload []byte) error {
+	// Start a transaction
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback(ctx)
+		} else {
+			tx.Commit(ctx)
+		}
+	}()
+
+	// Insert the transaction row
+	_, err = tx.Exec(ctx, `
+        INSERT INTO transactions (
+            payment_id,
+            idempotency_key,
+            source,
+            external_txn_id,
+            account_id,
+            amount_minor,
+            currency,
+            state,
+            schema_version,
+            metadata,
+            created_at,
+            updated_at
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+        )
+    `,
+		t.PaymentID,
+		t.IdempotencyKey,
+		t.Source,
+		t.ExternalTxnID,
+		t.AccountID,
+		t.Amount.MinorUnits,
+		t.Amount.Currency,
+		t.State,
+		t.SchemaVersion,
+		t.Metadata,
+		t.CreatedAt,
+		t.UpdatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("insert transaction: %w", err)
+	}
+
+	// Insert the outbox row
+	_, err = tx.Exec(ctx, `
+		INSERT INTO outbox (
+			aggregate_id,
+			topic,
+			partition_key,
+			payload,
+			created_at
+		) VALUES (
+
+			$1, $2, $3, $4, $5
+		)
+	`, t.PaymentID, "payments.received", t.AccountID, outboxPayload, t.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("insert outbox: %w", err)
+	}
+
 	return nil
 }
 

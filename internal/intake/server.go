@@ -4,6 +4,7 @@ package intake
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -40,6 +41,9 @@ func (s *Server) SubmitPayment(ctx context.Context, req *paymentv1.SubmitPayment
 	}
 	if s.Store == nil {
 		return nil, fmt.Errorf("store not configured")
+	}
+	if s.Idem == nil {
+		return nil, fmt.Errorf("idempotency store not configured")
 	}
 
 	raw := map[string]string{
@@ -81,6 +85,21 @@ func (s *Server) SubmitPayment(ctx context.Context, req *paymentv1.SubmitPayment
 		return nil, err
 	}
 
+	idempotencyKey := idempotency.DeriveKey(transaction)
+	claimed, existingPaymentID, err := s.Idem.Claim(ctx, idempotencyKey, transaction.PaymentID)
+	if err != nil {
+		return nil, fmt.Errorf("idempotency claim: %w", err)
+	}
+	if !claimed {
+		// Idempotency key already exists, return cached ack with existing payment ID.
+		return &paymentv1.SubmitPaymentResponse{
+			PaymentId:    existingPaymentID,
+			State:        paymentv1.PaymentState_PAYMENT_STATE_RECEIVED,
+			ReceivedAt:   timestamppb.Now(),
+			Deduplicated: true,
+		}, nil
+	}
+
 	if s.Validator != nil {
 		if err := s.Validator.Validate(transaction); err != nil {
 			return nil, err
@@ -91,7 +110,14 @@ func (s *Server) SubmitPayment(ctx context.Context, req *paymentv1.SubmitPayment
 	transaction.CreatedAt = now
 	transaction.UpdatedAt = now
 
-	if err := s.Store.Save(ctx, transaction); err != nil {
+	outboxPayload, err := json.Marshal(map[string]string{
+		"event": "payment.received",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal outbox payload: %w", err)
+	}
+
+	if err := s.Store.SaveWithOutbox(ctx, transaction, outboxPayload); err != nil {
 		return nil, err
 	}
 
