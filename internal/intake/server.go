@@ -13,6 +13,7 @@ import (
 	"github.com/varadsat/distributed-payment-pipeline/internal/domain"
 	"github.com/varadsat/distributed-payment-pipeline/internal/idempotency"
 	"github.com/varadsat/distributed-payment-pipeline/internal/normalize"
+	"github.com/varadsat/distributed-payment-pipeline/internal/outbox"
 	"github.com/varadsat/distributed-payment-pipeline/internal/store"
 	"github.com/varadsat/distributed-payment-pipeline/internal/validate"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -110,9 +111,7 @@ func (s *Server) SubmitPayment(ctx context.Context, req *paymentv1.SubmitPayment
 	transaction.CreatedAt = now
 	transaction.UpdatedAt = now
 
-	outboxPayload, err := json.Marshal(map[string]string{
-		"event": "payment.received",
-	})
+	outboxPayload, err := json.Marshal(outbox.NewPaymentReceivedEvent(transaction))
 	if err != nil {
 		return nil, fmt.Errorf("marshal outbox payload: %w", err)
 	}

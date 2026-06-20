@@ -1,4 +1,4 @@
-.PHONY: proto build up down migrate-up migrate-down test load-test tidy
+.PHONY: proto build up down migrate-up migrate-down test load-test tidy provision-topics
 
 # Generate Go code from protobuf (requires protoc + protoc-gen-go + protoc-gen-go-grpc)
 proto:
@@ -18,6 +18,9 @@ build:
 
 up:
 	docker compose up -d
+	@echo "waiting for redpanda..."
+	@timeout /t 3 /nobreak >NUL
+	$(MAKE) provision-topics
 
 down:
 	docker compose down
@@ -30,3 +33,6 @@ load-test:
 
 tidy:
 	go mod tidy
+
+provision-topics:
+	go run ./cmd/provision-topics
