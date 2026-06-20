@@ -15,6 +15,7 @@ import (
 	paymentv1 "github.com/varadsat/distributed-payment-pipeline/gen/payment/v1"
 	"github.com/varadsat/distributed-payment-pipeline/internal/config"
 	"github.com/varadsat/distributed-payment-pipeline/internal/intake"
+	"github.com/varadsat/distributed-payment-pipeline/internal/normalize"
 	"github.com/varadsat/distributed-payment-pipeline/internal/store"
 )
 
@@ -27,9 +28,14 @@ func main() {
 	}
 	defer dbStore.Close()
 
+	registry := normalize.NewRegistry()
+	registry.Register("CARD", 1, &normalize.CardNormalizer{})
+	registry.Register("UPI", 1, &normalize.UPINormalizer{})
+
 	grpcServer := grpc.NewServer()
 	paymentv1.RegisterPaymentIntakeServer(grpcServer, &intake.Server{
-		Store: dbStore,
+		Normalizers: registry,
+		Store:       dbStore,
 	})
 
 	reflection.Register(grpcServer) // enables grpcurl / reflection clients

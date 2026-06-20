@@ -4,6 +4,7 @@ package intake
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,12 +35,26 @@ type Server struct {
 //  4. SaveWithOutbox (transaction row + outbox row in one DB tx)
 //  5. return ack (the relay publishes to Kafka asynchronously)
 func (s *Server) SubmitPayment(ctx context.Context, req *paymentv1.SubmitPaymentRequest) (*paymentv1.SubmitPaymentResponse, error) {
-	var amount domain.Money
+	if s.Normalizers == nil {
+		return nil, fmt.Errorf("normalizers not configured")
+	}
+	if s.Store == nil {
+		return nil, fmt.Errorf("store not configured")
+	}
+
+	raw := map[string]string{
+		"payment_id":      uuid.NewString(),
+		"idempotency_key": req.GetIdempotencyKey(),
+		"account_id":      req.GetAccountId(),
+		"external_txn_id": req.GetExternalTxnId(),
+		"currency":        req.GetAmount().GetCurrency(),
+		"state":           string(domain.StateReceived),
+	}
 	if req.GetAmount() != nil {
-		amount = domain.Money{
-			MinorUnits: req.GetAmount().MinorUnits,
-			Currency:   req.GetAmount().Currency,
-		}
+		raw["amount"] = formatAmount(req.GetAmount().GetMinorUnits())
+	}
+	for key, value := range req.GetMetadata() {
+		raw[key] = value
 	}
 
 	var source domain.Source
@@ -53,23 +68,28 @@ func (s *Server) SubmitPayment(ctx context.Context, req *paymentv1.SubmitPayment
 	case paymentv1.PaymentSource_PAYMENT_SOURCE_WALLET:
 		source = domain.SourceWallet
 	default:
-		source = ""
+		return nil, fmt.Errorf("unsupported source: %v", req.GetSource())
+	}
+
+	normalizer, err := s.Normalizers.Get(string(source), int32(req.GetSchemaVersion()))
+	if err != nil {
+		return nil, err
+	}
+
+	transaction, err := normalizer.Normalize(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	if s.Validator != nil {
+		if err := s.Validator.Validate(transaction); err != nil {
+			return nil, err
+		}
 	}
 
 	now := time.Now()
-	transaction := domain.Transaction{
-		PaymentID:      uuid.NewString(),
-		IdempotencyKey: req.IdempotencyKey,
-		Source:         source,
-		ExternalTxnID:  req.ExternalTxnId,
-		AccountID:      req.AccountId,
-		Amount:         amount,
-		State:          domain.StateReceived,
-		SchemaVersion:  req.SchemaVersion,
-		Metadata:       req.Metadata,
-		CreatedAt:      now,
-		UpdatedAt:      now,
-	}
+	transaction.CreatedAt = now
+	transaction.UpdatedAt = now
 
 	if err := s.Store.Save(ctx, transaction); err != nil {
 		return nil, err
@@ -81,4 +101,17 @@ func (s *Server) SubmitPayment(ctx context.Context, req *paymentv1.SubmitPayment
 		ReceivedAt:   timestamppb.New(transaction.CreatedAt),
 		Deduplicated: false,
 	}, nil
+}
+
+func formatAmount(minorUnits int64) string {
+	sign := ""
+	value := minorUnits
+	if value < 0 {
+		sign = "-"
+		value = -value
+	}
+
+	major := value / 100
+	minor := value % 100
+	return fmt.Sprintf("%s%d.%02d", sign, major, minor)
 }

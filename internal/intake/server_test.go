@@ -7,6 +7,7 @@ import (
 
 	paymentv1 "github.com/varadsat/distributed-payment-pipeline/gen/payment/v1"
 	"github.com/varadsat/distributed-payment-pipeline/internal/domain"
+	"github.com/varadsat/distributed-payment-pipeline/internal/normalize"
 )
 
 type fakeStore struct {
@@ -51,7 +52,12 @@ func (f *fakeStore) Close() {}
 func TestSubmitPaymentSavesTransactionAndReturnsResponse(t *testing.T) {
 	ctx := context.Background()
 	store := &fakeStore{}
-	server := &Server{Store: store}
+	registry := normalize.NewRegistry()
+	registry.Register("CARD", 1, &normalize.CardNormalizer{})
+	server := &Server{
+		Store:       store,
+		Normalizers: registry,
+	}
 
 	req := &paymentv1.SubmitPaymentRequest{
 		IdempotencyKey: "idem-123",
@@ -108,10 +114,21 @@ func TestSubmitPaymentSavesTransactionAndReturnsResponse(t *testing.T) {
 func TestSubmitPaymentReturnsStoreError(t *testing.T) {
 	ctx := context.Background()
 	expectedErr := errors.New("save failed")
-	server := &Server{Store: &fakeStore{saveErr: expectedErr}}
+	registry := normalize.NewRegistry()
+	registry.Register("CARD", 1, &normalize.CardNormalizer{})
+	server := &Server{
+		Store:       &fakeStore{saveErr: expectedErr},
+		Normalizers: registry,
+	}
 
 	resp, err := server.SubmitPayment(ctx, &paymentv1.SubmitPaymentRequest{
 		IdempotencyKey: "idem-456",
+		Source:         paymentv1.PaymentSource_PAYMENT_SOURCE_CARD,
+		Amount: &paymentv1.Money{
+			MinorUnits: 100,
+			Currency:   "USD",
+		},
+		SchemaVersion: 1,
 	})
 	if resp != nil {
 		t.Errorf("SubmitPayment() response = %+v, want nil", resp)
