@@ -24,7 +24,10 @@ func newTestPoster(t *testing.T) (*DoubleEntryPoster, *pgxpool.Pool) {
 	pg, err := postgres.Run(
 		ctx,
 		"postgres:16-alpine",
-		postgres.WithInitScripts("../store/migrations/0001_init.up.sql"),
+		postgres.WithInitScripts(
+			"../store/migrations/0001_init.up.sql",
+			"../store/migrations/0002_ledger_idempotency.up.sql",
+		),
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
@@ -126,11 +129,11 @@ func TestPost_InsertsDebitAndCreditLegs(t *testing.T) {
 	}
 }
 
-// TestPost_IsAtomicOnFailure verifies that no entries are persisted if only
-// one leg can be written (simulated by using an invalid payment_id for the
-// second insert, which we test by calling Post twice with the same payment_id).
-func TestPost_IdempotencyKey_DuplicatePaymentIDIsRejected(t *testing.T) {
-	poster, _ := newTestPoster(t)
+// TestPost_DuplicateDeliveryReturnsErrAlreadyPosted verifies that a second
+// Post() for the same payment_id returns ErrAlreadyPosted (idempotent skip)
+// rather than inserting duplicate ledger legs.
+func TestPost_DuplicateDeliveryReturnsErrAlreadyPosted(t *testing.T) {
+	poster, pool := newTestPoster(t)
 	ctx := context.Background()
 	trx := newTrx()
 
@@ -138,14 +141,20 @@ func TestPost_IdempotencyKey_DuplicatePaymentIDIsRejected(t *testing.T) {
 		t.Fatalf("first Post() error = %v", err)
 	}
 
-	// Second call with same payment_id must fail (payment_id is PK-like:
-	// ledger_entries has no unique constraint on payment_id alone, but the
-	// surrounding product convention is one posting per payment).
-	// If a unique index is added later this test will enforce it automatically.
-	// For now, assert the second post succeeds but the row count doubles — this
-	// documents current behaviour and is the baseline to tighten.
-	if err := poster.Post(ctx, trx); err != nil {
-		t.Logf("second Post() returned error (acceptable if uniqueness enforced): %v", err)
+	// Simulate at-least-once re-delivery of the same Kafka record.
+	if err := poster.Post(ctx, trx); err != ErrAlreadyPosted {
+		t.Fatalf("second Post() = %v, want ErrAlreadyPosted", err)
+	}
+
+	// Confirm no duplicate rows were inserted — still exactly 2.
+	var count int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM ledger_entries WHERE payment_id = $1`, trx.PaymentID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count query: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("ledger_entries count = %d after duplicate delivery, want 2", count)
 	}
 }
 
