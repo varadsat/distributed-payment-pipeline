@@ -243,5 +243,70 @@ func (s *pgxStore) SaveWithOutbox(ctx context.Context, t domain.Transaction, out
 }
 
 func (s *pgxStore) UpdateState(ctx context.Context, paymentID string, from, to domain.State) error {
+	// 1. Validate the transition against the state machine before touching the DB.
+	if err := domain.Transition(from, to); err != nil {
+		return fmt.Errorf("UpdateState: %w", err)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("UpdateState: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// 2. Update the transaction row — but ONLY if the current state in the DB
+	//    matches `from`. The WHERE clause on `state` is the concurrency guard:
+	//    if two callers race to transition the same payment, only one wins.
+	//    The other sees rowsAffected = 0 and gets a clear error rather than
+	//    silently overwriting a state that has already moved on.
+	tag, err := tx.Exec(ctx, `
+        UPDATE transactions
+           SET state      = $1,
+               updated_at = now()
+         WHERE payment_id = $2
+           AND state      = $3
+    `, to, paymentID, from)
+	if err != nil {
+		return fmt.Errorf("UpdateState: update transactions: %w", err)
+	}
+
+	// 3. rowsAffected = 0 has two possible causes:
+	//    a) payment_id does not exist at all.
+	//    b) payment_id exists but its current state != `from` (lost the race,
+	//       or caller passed the wrong `from`).
+	//    We distinguish them with a follow-up SELECT so we can return a
+	//    meaningful error to the caller instead of a generic "not found".
+	if tag.RowsAffected() == 0 {
+		var currentState domain.State
+		err := tx.QueryRow(ctx, `
+            SELECT state FROM transactions WHERE payment_id = $1
+        `, paymentID).Scan(&currentState)
+
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("UpdateState: payment %s not found", paymentID)
+		}
+		if err != nil {
+			return fmt.Errorf("UpdateState: check current state: %w", err)
+		}
+		// Payment exists but state has already moved — concurrent update won.
+		return fmt.Errorf("UpdateState: stale transition %s->%s: current state is %s (payment %s)",
+			from, to, currentState, paymentID)
+	}
+
+	// 4. Write the audit row. This is unconditional — every state change gets
+	//    a record. Gives you a full timeline of every transition for any
+	//    payment, which is invaluable during incident investigation.
+	_, err = tx.Exec(ctx, `
+        INSERT INTO state_transitions (payment_id, from_state, to_state, created_at)
+        VALUES ($1, $2, $3, now())
+    `, paymentID, from, to)
+	if err != nil {
+		return fmt.Errorf("UpdateState: insert state_transitions: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("UpdateState: commit: %w", err)
+	}
+
 	return nil
 }
