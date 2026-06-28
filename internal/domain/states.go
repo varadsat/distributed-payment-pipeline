@@ -21,7 +21,7 @@ const (
 // allowed encodes the legal transitions. Any move not listed is rejected.
 var allowed = map[State][]State{
 	StateReceived:   {StateValidated, StateFailed},
-	StateValidated:  {StateAuthorized, StateFailed},
+	StateValidated:  {StateAuthorized, StateCaptured, StateFailed},
 	StateAuthorized: {StateCaptured, StateFailed},
 	StateCaptured:   {StateSettled, StateFailed},
 	StateSettled:    {StateReconciled},

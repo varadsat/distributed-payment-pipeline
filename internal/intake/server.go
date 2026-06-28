@@ -103,9 +103,11 @@ func (s *Server) SubmitPayment(ctx context.Context, req *paymentv1.SubmitPayment
 
 	if s.Validator != nil {
 		if err := s.Validator.Validate(transaction); err != nil {
+			s.Store.UpdateState(ctx, transaction.PaymentID, domain.StateReceived, domain.StateFailed)
 			return nil, err
 		}
 	}
+	s.Store.UpdateState(ctx, transaction.PaymentID, domain.StateReceived, domain.StateValidated)
 
 	now := time.Now()
 	transaction.CreatedAt = now

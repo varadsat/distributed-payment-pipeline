@@ -16,6 +16,7 @@ import (
 	"github.com/varadsat/distributed-payment-pipeline/internal/kafka"
 	"github.com/varadsat/distributed-payment-pipeline/internal/ledger"
 	"github.com/varadsat/distributed-payment-pipeline/internal/outbox"
+	"github.com/varadsat/distributed-payment-pipeline/internal/store"
 )
 
 const consumerGroup = "ledger-consumer"
@@ -39,7 +40,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	poster := ledger.NewDoubleEntryPoster(pool, logger)
+	st, err := store.NewStore(ctx, cfg.PostgresURL)
+	if err != nil {
+		logger.Error("failed to create store", "error", err)
+		os.Exit(1)
+	}
+	defer st.Close()
+
+	poster := ledger.NewDoubleEntryPoster(pool, st, logger)
 
 	logger.Info("ledger consumer starting")
 	if err := consumer.Consume(ctx, kafka.TopicPaymentsReceived, consumerGroup, handle(ctx, poster, logger)); err != nil && ctx.Err() == nil {

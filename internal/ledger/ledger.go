@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/varadsat/distributed-payment-pipeline/internal/domain"
+	"github.com/varadsat/distributed-payment-pipeline/internal/store"
 )
 
 // ErrAlreadyPosted is returned when both ledger legs for a payment_id already
@@ -24,11 +25,12 @@ type Poster interface {
 // TODO: implement double-entry posting + a balance() assertion in tests.
 type DoubleEntryPoster struct {
 	pool   *pgxpool.Pool
+	store  store.Store
 	logger *slog.Logger
 }
 
-func NewDoubleEntryPoster(pool *pgxpool.Pool, logger *slog.Logger) *DoubleEntryPoster {
-	return &DoubleEntryPoster{pool: pool, logger: logger}
+func NewDoubleEntryPoster(pool *pgxpool.Pool, st store.Store, logger *slog.Logger) *DoubleEntryPoster {
+	return &DoubleEntryPoster{pool: pool, store: st, logger: logger}
 }
 
 func (p *DoubleEntryPoster) Post(ctx context.Context, trx domain.Transaction) error {
@@ -40,6 +42,10 @@ func (p *DoubleEntryPoster) Post(ctx context.Context, trx domain.Transaction) er
 
 	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
+		// Failed to begin transaction - transition to FAILED state
+		if stateErr := p.store.UpdateState(ctx, trx.PaymentID, domain.StateValidated, domain.StateFailed); stateErr != nil {
+			p.logger.Error("failed to update state to FAILED after begin error", "payment_id", trx.PaymentID, "error", stateErr)
+		}
 		return err
 	}
 	defer func() {
@@ -63,6 +69,10 @@ func (p *DoubleEntryPoster) Post(ctx context.Context, trx domain.Transaction) er
 		trx.Amount.Currency,
 	)
 	if err != nil {
+		// Failed to insert debit - transition to FAILED state
+		if stateErr := p.store.UpdateState(ctx, trx.PaymentID, domain.StateValidated, domain.StateFailed); stateErr != nil {
+			p.logger.Error("failed to update state to FAILED after debit error", "payment_id", trx.PaymentID, "error", stateErr)
+		}
 		return fmt.Errorf("insert debit: %w", err)
 	}
 
@@ -76,6 +86,10 @@ func (p *DoubleEntryPoster) Post(ctx context.Context, trx domain.Transaction) er
 		trx.Amount.Currency,
 	)
 	if err != nil {
+		// Failed to insert credit - transition to FAILED state
+		if stateErr := p.store.UpdateState(ctx, trx.PaymentID, domain.StateValidated, domain.StateFailed); stateErr != nil {
+			p.logger.Error("failed to update state to FAILED after credit error", "payment_id", trx.PaymentID, "error", stateErr)
+		}
 		return fmt.Errorf("insert credit: %w", err)
 	}
 
@@ -90,5 +104,13 @@ func (p *DoubleEntryPoster) Post(ctx context.Context, trx domain.Transaction) er
 	}
 
 	p.logger.Info("ledger entries posted", "payment_id", trx.PaymentID)
+
+	// Transition state from VALIDATED to CAPTURED after successful posting.
+	if err := p.store.UpdateState(ctx, trx.PaymentID, domain.StateValidated, domain.StateCaptured); err != nil {
+		p.logger.Error("failed to update state to CAPTURED", "payment_id", trx.PaymentID, "error", err)
+		return fmt.Errorf("update state to CAPTURED: %w", err)
+	}
+
+	p.logger.Info("state transitioned to CAPTURED", "payment_id", trx.PaymentID)
 	return nil
 }

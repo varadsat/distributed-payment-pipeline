@@ -14,9 +14,10 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 	"github.com/varadsat/distributed-payment-pipeline/internal/domain"
+	"github.com/varadsat/distributed-payment-pipeline/internal/store"
 )
 
-func newTestPoster(t *testing.T) (*DoubleEntryPoster, *pgxpool.Pool) {
+func newTestPoster(t *testing.T) (*DoubleEntryPoster, *pgxpool.Pool, store.Store) {
 	t.Helper()
 
 	ctx := context.Background()
@@ -52,27 +53,41 @@ func newTestPoster(t *testing.T) (*DoubleEntryPoster, *pgxpool.Pool) {
 	}
 	t.Cleanup(pool.Close)
 
+	st, err := store.NewStore(ctx, connStr)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	t.Cleanup(st.Close)
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewDoubleEntryPoster(pool, logger), pool
+	return NewDoubleEntryPoster(pool, st, logger), pool, st
 }
 
 func newTrx() domain.Transaction {
 	return domain.Transaction{
-		PaymentID: uuid.New().String(),
-		AccountID: "acct-001",
-		Amount:    domain.Money{MinorUnits: 5000, Currency: "INR"},
-		Source:    domain.SourceCard,
-		State:     domain.StateReceived,
-		CreatedAt: time.Now().UTC(),
+		PaymentID:      uuid.New().String(),
+		IdempotencyKey: uuid.New().String(),
+		AccountID:      "acct-001",
+		Amount:         domain.Money{MinorUnits: 5000, Currency: "INR"},
+		Source:         domain.SourceCard,
+		State:          domain.StateValidated,
+		SchemaVersion:  1,
+		CreatedAt:      time.Now().UTC(),
+		UpdatedAt:      time.Now().UTC(),
 	}
 }
 
 // TestPost_InsertsDebitAndCreditLegs verifies that Post writes exactly one
 // DEBIT and one CREDIT row and that both amounts match the transaction.
 func TestPost_InsertsDebitAndCreditLegs(t *testing.T) {
-	poster, pool := newTestPoster(t)
+	poster, pool, st := newTestPoster(t)
 	ctx := context.Background()
 	trx := newTrx()
+
+	// Insert the transaction in VALIDATED state before posting
+	if err := st.Save(ctx, trx); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
 
 	if err := poster.Post(ctx, trx); err != nil {
 		t.Fatalf("Post() error = %v", err)
@@ -127,15 +142,29 @@ func TestPost_InsertsDebitAndCreditLegs(t *testing.T) {
 	if entries[1].direction != "DEBIT" || entries[1].account != trx.AccountID {
 		t.Errorf("second row = {direction:%q account:%q}, want {DEBIT %s}", entries[1].direction, entries[1].account, trx.AccountID)
 	}
+
+	// Verify state transition to CAPTURED
+	updatedTrx, err := st.GetByPaymentID(ctx, trx.PaymentID)
+	if err != nil {
+		t.Fatalf("GetByPaymentID() error = %v", err)
+	}
+	if updatedTrx.State != domain.StateCaptured {
+		t.Errorf("state = %q, want %q", updatedTrx.State, domain.StateCaptured)
+	}
 }
 
 // TestPost_DuplicateDeliveryReturnsErrAlreadyPosted verifies that a second
 // Post() for the same payment_id returns ErrAlreadyPosted (idempotent skip)
 // rather than inserting duplicate ledger legs.
 func TestPost_DuplicateDeliveryReturnsErrAlreadyPosted(t *testing.T) {
-	poster, pool := newTestPoster(t)
+	poster, pool, st := newTestPoster(t)
 	ctx := context.Background()
 	trx := newTrx()
+
+	// Insert the transaction in VALIDATED state before posting
+	if err := st.Save(ctx, trx); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
 
 	if err := poster.Post(ctx, trx); err != nil {
 		t.Fatalf("first Post() error = %v", err)
@@ -161,7 +190,7 @@ func TestPost_DuplicateDeliveryReturnsErrAlreadyPosted(t *testing.T) {
 // TestPost_ZeroAmountIsRejected verifies that a zero-value payment results in
 // an error rather than writing silent no-op entries.
 func TestPost_ZeroAmountIsRejected(t *testing.T) {
-	poster, _ := newTestPoster(t)
+	poster, _, _ := newTestPoster(t)
 	ctx := context.Background()
 
 	trx := newTrx()
