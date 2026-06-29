@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -94,19 +95,24 @@ func (p *DoubleEntryPoster) Post(ctx context.Context, trx domain.Transaction) er
 	}
 
 	// Both legs already existed — this is a duplicate delivery. Roll back the
-	// no-op transaction and return ErrAlreadyPosted so the caller can log it
-	// without treating it as a failure.
+	// no-op transaction but continue with state transition.
 	if debitTag.RowsAffected() == 0 && creditTag.RowsAffected() == 0 {
 		_ = tx.Rollback(ctx)
 		err = nil // prevent defer from double-rolling-back
 		p.logger.Warn("duplicate ledger post skipped", "payment_id", trx.PaymentID)
-		return ErrAlreadyPosted
+		// Continue to attempt state transition (idempotent re-delivery).
+	} else {
+		p.logger.Info("ledger entries posted", "payment_id", trx.PaymentID)
 	}
 
-	p.logger.Info("ledger entries posted", "payment_id", trx.PaymentID)
-
 	// Transition state from VALIDATED to CAPTURED after successful posting.
+	// On re-delivery, state might already be CAPTURED; that's an acceptable no-op.
 	if err := p.store.UpdateState(ctx, trx.PaymentID, domain.StateValidated, domain.StateCaptured); err != nil {
+		// If already in CAPTURED state (stale transition), treat as idempotent success.
+		if strings.Contains(err.Error(), "stale transition") && strings.Contains(err.Error(), string(domain.StateCaptured)) {
+			p.logger.Debug("state already transitioned to CAPTURED", "payment_id", trx.PaymentID)
+			return nil
+		}
 		p.logger.Error("failed to update state to CAPTURED", "payment_id", trx.PaymentID, "error", err)
 		return fmt.Errorf("update state to CAPTURED: %w", err)
 	}
