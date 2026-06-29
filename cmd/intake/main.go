@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"log"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -22,6 +23,7 @@ import (
 )
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg := config.Load()
 
 	dbStore, err := store.NewStore(context.Background(), cfg.PostgresURL)
@@ -47,6 +49,7 @@ func main() {
 		Normalizers: registry,
 		Store:       dbStore,
 		Idem:        redisStore,
+		Logger:      logger,
 	})
 
 	reflection.Register(grpcServer) // enables grpcurl / reflection clients

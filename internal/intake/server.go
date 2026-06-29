@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,6 +28,7 @@ type Server struct {
 	Validator   validate.Validator
 	Idem        idempotency.Store
 	Store       store.Store
+	Logger      *slog.Logger
 	paymentv1.UnimplementedPaymentIntakeServer
 }
 
@@ -45,6 +47,11 @@ func (s *Server) SubmitPayment(ctx context.Context, req *paymentv1.SubmitPayment
 	}
 	if s.Idem == nil {
 		return nil, fmt.Errorf("idempotency store not configured")
+	}
+
+	logger := s.Logger
+	if logger == nil {
+		logger = slog.Default()
 	}
 
 	raw := map[string]string{
@@ -73,26 +80,37 @@ func (s *Server) SubmitPayment(ctx context.Context, req *paymentv1.SubmitPayment
 	case paymentv1.PaymentSource_PAYMENT_SOURCE_WALLET:
 		source = domain.SourceWallet
 	default:
+		logger.Error("unsupported payment source", "source", req.GetSource())
 		return nil, fmt.Errorf("unsupported source: %v", req.GetSource())
 	}
 
+	logger.Debug("normalizing payment", "payment_id", raw["payment_id"], "source", source, "schema_version", req.GetSchemaVersion())
+
 	normalizer, err := s.Normalizers.Get(string(source), int32(req.GetSchemaVersion()))
 	if err != nil {
+		logger.Error("normalizer not found", "source", source, "schema_version", req.GetSchemaVersion(), "error", err)
 		return nil, err
 	}
 
 	transaction, err := normalizer.Normalize(raw)
 	if err != nil {
+		logger.Error("normalization failed", "payment_id", raw["payment_id"], "error", err)
 		return nil, err
 	}
 
+	logger.Debug("payment normalized successfully", "payment_id", transaction.PaymentID)
+
 	idempotencyKey := idempotency.DeriveKey(transaction)
+	logger.Debug("claiming idempotency", "payment_id", transaction.PaymentID, "idempotency_key", idempotencyKey)
+
 	claimed, existingPaymentID, err := s.Idem.Claim(ctx, idempotencyKey, transaction.PaymentID)
 	if err != nil {
+		logger.Error("idempotency claim failed", "payment_id", transaction.PaymentID, "error", err)
 		return nil, fmt.Errorf("idempotency claim: %w", err)
 	}
 	if !claimed {
 		// Idempotency key already exists, return cached ack with existing payment ID.
+		logger.Warn("duplicate payment detected", "payment_id", transaction.PaymentID, "existing_payment_id", existingPaymentID)
 		return &paymentv1.SubmitPaymentResponse{
 			PaymentId:    existingPaymentID,
 			State:        paymentv1.PaymentState_PAYMENT_STATE_RECEIVED,
@@ -102,26 +120,34 @@ func (s *Server) SubmitPayment(ctx context.Context, req *paymentv1.SubmitPayment
 	}
 
 	if s.Validator != nil {
+		logger.Debug("validating payment", "payment_id", transaction.PaymentID)
 		if err := s.Validator.Validate(transaction); err != nil {
-			s.Store.UpdateState(ctx, transaction.PaymentID, domain.StateReceived, domain.StateFailed)
+			logger.Error("validation failed", "payment_id", transaction.PaymentID, "error", err)
 			return nil, err
 		}
 	}
-	s.Store.UpdateState(ctx, transaction.PaymentID, domain.StateReceived, domain.StateValidated)
+
+	logger.Debug("transitioning state to VALIDATED", "payment_id", transaction.PaymentID)
+	transaction.State = domain.StateValidated
 
 	now := time.Now()
 	transaction.CreatedAt = now
 	transaction.UpdatedAt = now
 
+	logger.Debug("marshaling outbox payload", "payment_id", transaction.PaymentID)
 	outboxPayload, err := json.Marshal(outbox.NewPaymentReceivedEvent(transaction))
 	if err != nil {
+		logger.Error("failed to marshal outbox payload", "payment_id", transaction.PaymentID, "error", err)
 		return nil, fmt.Errorf("marshal outbox payload: %w", err)
 	}
 
+	logger.Debug("saving transaction with outbox", "payment_id", transaction.PaymentID)
 	if err := s.Store.SaveWithOutbox(ctx, transaction, outboxPayload); err != nil {
+		logger.Error("failed to save transaction with outbox", "payment_id", transaction.PaymentID, "error", err)
 		return nil, err
 	}
 
+	logger.Info("payment submitted successfully", "payment_id", transaction.PaymentID, "account_id", transaction.AccountID, "amount_minor", transaction.Amount.MinorUnits, "currency", transaction.Amount.Currency)
 	return &paymentv1.SubmitPaymentResponse{
 		PaymentId:    transaction.PaymentID,
 		State:        paymentv1.PaymentState_PAYMENT_STATE_RECEIVED,
