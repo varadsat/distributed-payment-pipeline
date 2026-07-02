@@ -38,6 +38,8 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    volumes:
+      - kafka_data:/var/lib/kafka/data
 
   kafka-ui:
     image: ghcr.io/kafbat/kafka-ui:latest
@@ -51,3 +53,4 @@ services:
 
 volumes:
   pgdata:
+  kafka_data:
