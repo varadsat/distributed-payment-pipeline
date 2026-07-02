@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -40,6 +41,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	dlqProducer, err := kafka.NewProducer(cfg.KafkaBroker)
+	if err != nil {
+		logger.Error("failed to create dlq producer", "error", err)
+		os.Exit(1)
+	}
+
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:     cfg.RedisAddr,
 		Password: "",
@@ -49,8 +56,16 @@ func main() {
 
 	fraudEngine := fraudscore.NewFraudEngine(pool, redisClient, logger)
 
+	handler := kafka.RetryHandler(
+		handle(ctx, logger, fraudEngine),
+		dlqProducer,
+		kafka.TopicPaymentsReceived,
+		consumerGroup,
+		3,
+	)
+
 	logger.Info("fraud consumer starting")
-	if err := consumer.Consume(ctx, kafka.TopicPaymentsReceived, consumerGroup, handle(ctx, logger, fraudEngine)); err != nil && ctx.Err() == nil {
+	if err := consumer.Consume(ctx, kafka.TopicPaymentsReceived, consumerGroup, handler); err != nil && ctx.Err() == nil {
 		logger.Error("consumer exited with error", "error", err)
 		os.Exit(1)
 	}
@@ -62,7 +77,7 @@ func handle(ctx context.Context, logger *slog.Logger, engine *fraudscore.FraudEn
 		var event outbox.PaymentReceivedEvent
 		if err := json.Unmarshal(payload, &event); err != nil {
 			logger.Warn("skipping unparseable event", "error", err, "payload", string(payload))
-			return nil
+			return fmt.Errorf("%w: unmarshal: %w", kafka.ErrNonRetryable, err)
 		}
 
 		if event.PaymentID == "" || event.AccountID == "" || event.Currency == "" {
@@ -71,7 +86,7 @@ func handle(ctx context.Context, logger *slog.Logger, engine *fraudscore.FraudEn
 				"account_id", event.AccountID,
 				"currency", event.Currency,
 			)
-			return nil
+			return fmt.Errorf("%w: unmarshal: %w", kafka.ErrNonRetryable, errors.New("malformed event"))
 		}
 
 		trx := domain.Transaction{
